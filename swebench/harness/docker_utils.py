@@ -171,6 +171,9 @@ def cleanup_container(client, container, logger):
         )
 
 
+import multiprocessing
+
+
 def exec_run_with_timeout(container, cmd, timeout: int|None=60):
     """
     Run a command in a container with a timeout.
@@ -186,25 +189,30 @@ def exec_run_with_timeout(container, cmd, timeout: int|None=60):
     exception = None
 
     # Wrapper function to run the command
-    def run_command():
+    def run_command(queue):
         nonlocal exec_result, exec_id, exception
         try:
             exec_id = container.client.api.exec_create(container.id, cmd)["Id"]
             exec_result = container.client.api.exec_start(exec_id)
+            queue.put((exec_result, None))
         except Exception as e:
-            exception = e
+            queue.put((None, e))
 
-    # Start the command in a separate thread
-    thread = threading.Thread(target=run_command)
-    thread.start()
-    thread.join(timeout)
+    # Create a queue to get the result from the process
+    queue = multiprocessing.Queue()
+    process = multiprocessing.Process(target=run_command, args=(queue,))
+    process.start()
+    process.join(timeout)
+
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        raise TimeoutError(f"Command '{cmd}' timed out after {timeout} seconds")
+
+    exec_result, exception = queue.get()
 
     if exception:
         raise exception
-
-    # If the thread is still alive, the command timed out
-    if thread.is_alive():
-        raise TimeoutError(f"Command '{cmd}' timed out after {timeout} seconds")
 
     return exec_result
 
